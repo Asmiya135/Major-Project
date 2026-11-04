@@ -16,6 +16,8 @@ set VITE_EDGE_URL=http://localhost:8001
 set BT_PEERS=%~3
 :: Bluetooth simulation over Wi-Fi as a backup to real Bluetooth (both run; duplicates are ignored)
 set BT_SIM_IFACE=lan
+if "%BT_MODE%"=="" set BT_MODE=auto
+if /i "%BT_MODE%"=="rfcomm" if "%BT_PEERS%"=="" set BT_MODE=auto
 
 echo Car %CLIENT_ID%  ->  server %SERVER_URL%   BT peer: %BT_PEERS%
 start "CAR %CLIENT_ID%" cmd /k call "%~dp0start_car.bat" %CLIENT_ID% 8001

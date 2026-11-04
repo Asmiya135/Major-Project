@@ -26,6 +26,7 @@ const MUMBAI: [number, number] = [72.8777, 19.076];
 const DEMO_HAZARD_M = 300;        // pre-mapped demo hazard: this far along the route
 const DEMO_SEE_AHEAD_M = 25;      // the simulated camera "sees" it this far ahead
 const TICK_MS = 500;
+const MATCH_MAX_M = 600;          // a V2X hazard this close to our route counts as "on our route"
 
 function hav(a: [number, number], b: [number, number]) {
   const R = 6371000, r = Math.PI / 180;
@@ -48,6 +49,22 @@ function along(coords: [number, number][], dist: number): { p: [number, number];
     left -= seg;
   }
   return { p: coords[coords.length - 1] ?? MUMBAI, heading: 0, done: true };
+}
+
+/** Map-match a point onto a [lng,lat] polyline: distance along it and perpendicular offset (metres). */
+function matchToRoute(coords: [number, number][], pt: [number, number]): { along: number; offset: number } {
+  const k = Math.cos(pt[1] * Math.PI / 180) * 111320, ky = 110540;
+  let best = { along: 0, offset: Infinity }, cum = 0;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const a = coords[i], b = coords[i + 1];
+    const ax = a[0] * k, ay = a[1] * ky, bx = b[0] * k, by = b[1] * ky, px = pt[0] * k, py = pt[1] * ky;
+    const dx = bx - ax, dy = by - ay, seg2 = dx * dx + dy * dy;
+    const t = seg2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / seg2)) : 0;
+    const off = Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+    if (off < best.offset) best = { along: cum + t * Math.sqrt(seg2), offset: off };
+    cum += Math.sqrt(seg2);
+  }
+  return best;
 }
 
 export default function DriveAndSummary() {
@@ -160,7 +177,7 @@ export default function DriveAndSummary() {
   useEffect(() => {
     if (!demo || !demoPoint || demoState !== 'ahead') return;
     if (travelledM < demoAlong - DEMO_SEE_AHEAD_M) return;
-    const known = btHeard.find((h) => hav([h.lon, h.lat], demoPoint) < 40);
+    const known = btHeard[0];      // in the demo the only V2X hazard is this pothole
     if (known) {
       setDemoState('known-via-v2x');
       setDemoResult(`Already received from ${known.from} over Bluetooth — not re-reported`);
@@ -175,6 +192,28 @@ export default function DriveAndSummary() {
       })
       .catch((e) => { setDemoState('ahead'); setDemoResult(`Detection failed: ${e}`); });
   }, [demo, demoPoint, demoAlong, travelledM, demoState, btHeard]);
+
+  // Demo: hazards heard over V2X are map-matched onto OUR route (the two cars' routes can start
+  // at slightly different points), and the alert fires when we come within the geofence radius.
+  const localAlerted = useRef<Set<string>>(new Set());
+  const radius = ev.status?.v2x_radius_m ?? 15;
+  const matched = btHeard.map((h) => ({ h, m: routeCoords.length > 1 ? matchToRoute(routeCoords, [h.lon, h.lat]) : null }));
+  useEffect(() => {
+    if (!demo) return;
+    for (const { h, m } of matched) {
+      if (!m || m.offset > MATCH_MAX_M || h.alerted || localAlerted.current.has(h.id)) continue;
+      const ahead = m.along - travelledM;
+      if (ahead <= radius && ahead > -radius) {
+        localAlerted.current.add(h.id);
+        ev.raiseBtAlert({
+          msg_id: h.id, hazard_type: h.type, severity: 'high', distance_m: Math.max(0, Math.round(ahead)), radius_m: radius,
+          from_client: h.from, from_name: h.from, transport: h.transport, latitude: h.lat, longitude: h.lon,
+          message: `${h.type.replace(/_/g, ' ')} ${Math.max(0, Math.round(ahead))} metres ahead, reported by ${h.from} over Bluetooth`,
+        });
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demo, travelledM, btHeard]);
 
   useEffect(() => { ev.resetRouteAlerts(); }, [ev.resetRouteAlerts, ev.connected]);
 
@@ -270,13 +309,18 @@ export default function DriveAndSummary() {
             )}
             {demoState === 'detecting' && <div className="text-yellow-300">📷 Detecting…</div>}
             {demoResult && <div className={demoState === 'reported' ? 'text-red-300' : 'text-sky-300'}>{demoResult}</div>}
-            {btHeard.map((h) => {
-              const d = userLngLat ? Math.round(hav(userLngLat, [h.lon, h.lat])) : null;
-              const r = ev.status?.v2x_radius_m ?? 15;
+            {matched.map(({ h, m }) => {
+              const onRoute = !!m && m.offset <= MATCH_MAX_M;
+              const ahead = onRoute ? Math.round(m!.along - travelledM) : null;
+              const straight = userLngLat ? Math.round(hav(userLngLat, [h.lon, h.lat])) : null;
+              const alerted = h.alerted || localAlerted.current.has(h.id);
               return (
-                <div key={h.id} className={`rounded-lg p-2 ${h.alerted ? 'bg-red-600/40' : 'bg-sky-700/40'}`}>
+                <div key={h.id} className={`rounded-lg p-2 ${alerted ? 'bg-red-600/50' : 'bg-sky-700/40'}`}>
                   📶 {h.type.replace(/_/g, ' ')} from <b>{h.from}</b> via {h.transport}<br />
-                  {d === null ? '' : h.alerted ? `⚠ ALERTED — ${d} m away` : `${d} m away · alert when inside ${r} m`}
+                  {alerted ? '⚠ ALERTED — hazard ahead!'
+                    : ahead !== null ? (ahead > 0 ? `${ahead} m ahead on your route · alert inside ${radius} m` : 'passed')
+                    : `${straight ?? '?'} m away (not on your route — use the same start/destination)`}
+                  {onRoute && m!.offset > 30 && <div className="text-gray-300">matched to your route ({Math.round(m!.offset)} m from the other car's route)</div>}
                 </div>
               );
             })}

@@ -173,6 +173,14 @@ class V2XBluetooth:
             s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
             s.sendto(payload, (config.BT_SIM_GROUP, config.BT_SIM_PORT))
             s.close()
+            if _SIM_IFACE != "127.0.0.1":
+                # Some Wi-Fi networks drop multicast between laptops but pass broadcast;
+                # the listener receives both and duplicates are ignored by msg_id.
+                b = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+                b.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                b.bind((_SIM_IFACE, 0))
+                b.sendto(payload, ("255.255.255.255", config.BT_SIM_PORT))
+                b.close()
             return True
         except OSError as e:
             self.sim_error = str(e)

@@ -92,7 +92,7 @@ export function useEdgeEvents(opts: { onMessage?: (m: Msg) => void } = {}) {
         if (m.type === 'verify_request') setVerifyQueue((q) => [...q.filter((v) => v.verify_id !== m.verify_id), m as VerifyRequest]);
         if (m.type === 'verify_question') setVerifyQueue((q) => q.map((v) => v.verify_id === m.verify_id ? { ...v, ...m } : v));
         if (m.type === 'verify_result') setVerifyQueue((q) => q.filter((v) => v.verify_id !== m.verify_id));
-        if (m.type === 'bt_alert') { setBtAlert(m as BtAlert); speak(m.message); }
+        if (m.type === 'bt_alert') { setBtAlert(m as BtAlert); speak(`Alert! Alert! ${m.message}`); }
         if (m.type === 'hazard_alert') { setRouteAlert(m as Msg & { message: string }); speak(m.message); }
         if (m.type === 'hazard_detected') setLastHazard(m);
         const d = describe(m);
@@ -119,6 +119,14 @@ export function useEdgeEvents(opts: { onMessage?: (m: Msg) => void } = {}) {
     connected, status, feed, verifyQueue, btAlert, routeAlert, lastHazard,
     sendTelemetry, resetRouteAlerts,
     dismissBtAlert: () => setBtAlert(null), dismissRouteAlert: () => setRouteAlert(null),
+    /** Raise a V2X alert decided on this page (demo: hazard map-matched onto our own route). */
+    raiseBtAlert: (a: BtAlert) => {
+      setBtAlert(a);
+      speak(`Alert! Alert! ${a.message}`);
+      const item = { id: ++seq.current, time: new Date().toLocaleTimeString(), kind: 'bt', tone: 'red' as const,
+                     text: `⚠ V2X ALERT: ${a.message}` };
+      setFeed((f) => [item, ...f].slice(0, 80));
+    },
     dropVerify: (id: number) => setVerifyQueue((q) => q.filter((v) => v.verify_id !== id)),
   };
 }
