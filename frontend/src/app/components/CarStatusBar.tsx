@@ -24,7 +24,7 @@ export function CarStatusBar({ status, connected }: { status: EdgeStatus | null;
 
       <button onClick={toggle} disabled={busy}
         className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full font-semibold ${status.online ? 'bg-green-600/80 hover:bg-green-600' : 'bg-amber-600/80 hover:bg-amber-600'}`}
-        title="Demo switch: simulate losing / regaining network">
+        title={`Demo switch: simulate losing / regaining network\nServer: ${status.server_url}${status.last_sync_error ? `\nLast error: ${status.last_sync_error}` : ''}`}>
         {status.online ? <Wifi className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5" />}
         {status.online ? 'ONLINE' : status.forced_offline ? 'OFFLINE (simulated)' : 'OFFLINE (server unreachable)'}
         <span className="opacity-70 font-normal">· click to {status.forced_offline ? 'reconnect' : 'go offline'}</span>

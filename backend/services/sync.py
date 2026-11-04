@@ -27,7 +27,7 @@ _fl_lock = threading.Lock()
 
 
 def _http():
-    return httpx.Client(timeout=config.SERVER_TIMEOUT_S)
+    return httpx.Client(trust_env=False, timeout=config.SERVER_TIMEOUT_S)
 
 
 def check_server() -> bool:
@@ -62,7 +62,7 @@ def _send(row: dict) -> dict:
     img = row.get("image_path")
     if img and Path(img).exists():
         files = {"image": (Path(img).name, Path(img).read_bytes(), "image/jpeg")}
-    with httpx.Client(timeout=max(config.SERVER_TIMEOUT_S, 8.0)) as c:
+    with httpx.Client(trust_env=False, timeout=max(config.SERVER_TIMEOUT_S, 8.0)) as c:
         r = c.post(f"{config.SERVER_URL}/api/reports", data={"meta": json.dumps(payload)}, files=files)
     r.raise_for_status()
     return r.json()
@@ -130,7 +130,7 @@ def pull_model() -> dict | None:
 
 def _pull_detector(version: int):
     try:
-        with httpx.Client(timeout=120) as c:
+        with httpx.Client(trust_env=False, timeout=120) as c:
             r = c.get(f"{config.SERVER_URL}/api/fl/detector/latest")
         r.raise_for_status()
         dest = config.LOCAL_MODELS_DIR / f"detector_v{version}.pt"
@@ -184,7 +184,7 @@ def maybe_auto_push():
 def fetch_route_hazards(coords: list) -> dict:
     if check_server():
         try:
-            with httpx.Client(timeout=8) as c:
+            with httpx.Client(trust_env=False, timeout=8) as c:
                 r = c.post(f"{config.SERVER_URL}/api/hazards/route", json={"coords": coords})
             r.raise_for_status()
             hz = r.json()["hazards"]
