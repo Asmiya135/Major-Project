@@ -18,8 +18,8 @@ set BT_PEERS=%~3
 set BT_SIM_IFACE=lan
 
 echo Car %CLIENT_ID%  ->  server %SERVER_URL%   BT peer: %BT_PEERS%
-start "CAR %CLIENT_ID%" cmd /k "%~dp0start_car.bat %CLIENT_ID% 8001"
-start "UI" cmd /k "cd /d %~dp0frontend && npm run dev"
+start "CAR %CLIENT_ID%" cmd /k call "%~dp0start_car.bat" %CLIENT_ID% 8001
+start "UI" /d "%~dp0frontend" cmd /k npm run dev
 timeout /t 10 /nobreak >nul
 start "" "http://localhost:5173/pipeline?edge=8001"
 pause

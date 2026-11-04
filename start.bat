@@ -7,11 +7,12 @@ echo    Car B (BT rx)  : http://localhost:8002
 echo    UI             : http://localhost:5173
 echo ============================================================
 
-start "SERVER (global)" cmd /k "%~dp0start_server.bat"
+start "SERVER (global)" cmd /k call "%~dp0start_server.bat"
 timeout /t 3 /nobreak >nul
-start "CAR A" cmd /k "%~dp0start_car.bat car-A 8001"
-start "CAR B" cmd /k "set WARMUP_MODELS=0&& %~dp0start_car.bat car-B 8002"
-start "UI" cmd /k "cd /d %~dp0frontend && npm run dev"
+start "CAR A" cmd /k call "%~dp0start_car.bat" car-A 8001
+set WARMUP_MODELS=0
+start "CAR B" cmd /k call "%~dp0start_car.bat" car-B 8002
+start "UI" /d "%~dp0frontend" cmd /k npm run dev
 timeout /t 8 /nobreak >nul
 
 echo.

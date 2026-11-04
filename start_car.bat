@@ -11,6 +11,6 @@ set CLIENT_ID=%1
 set EDGE_PORT=%2
 if "%CLIENT_ID%"=="" set CLIENT_ID=car-A
 if "%EDGE_PORT%"=="" set EDGE_PORT=8001
-cd /d %~dp0backend
+cd /d "%~dp0backend"
 echo Car %CLIENT_ID% edge agent on http://localhost:%EDGE_PORT%
 "%~dp0backend\venv\Scripts\python.exe" -m uvicorn main:app --host 0.0.0.0 --port %EDGE_PORT%

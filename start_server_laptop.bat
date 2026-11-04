@@ -4,8 +4,8 @@
 echo This laptop's IP addresses (give the Wi-Fi one to the car laptops):
 ipconfig | findstr /i "IPv4"
 echo.
-start "SERVER (global)" cmd /k "%~dp0start_server.bat"
-start "UI" cmd /k "cd /d %~dp0frontend && npm run dev"
+start "SERVER (global)" cmd /k call "%~dp0start_server.bat"
+start "UI" /d "%~dp0frontend" cmd /k npm run dev
 timeout /t 8 /nobreak >nul
 start "" "http://localhost:5173/server"
 echo Server console: http://localhost:5173/server
