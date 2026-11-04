@@ -1,110 +1,118 @@
 """
-Per-session state that lives in memory for the duration of a drive.
-Each session gets its own AKS frame memory and SORT tracker instance
-so that consecutive frames are processed correctly without mixing state.
+Per-session pipeline memory for one camera stream: the AKS reference frame, frame
+counters, the SORT vehicle tracker (stalled-vehicle head) and the hazard tracker that
+gives the fusion engine its "tracking persistence" signal and stops the same pothole
+being reported on every frame.
 """
-import time
 import threading
+import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Any
+from typing import Any, Dict, Optional
 
 import config
+
+
+def iou(a, b) -> float:
+    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+    x2, y2 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    ua = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / ua if ua > 0 else 0.0
+
+
+@dataclass
+class HazardTrack:
+    id: int
+    hazard_type: str
+    bbox: list
+    hits: int = 1
+    last_frame: int = 0
+    reported: bool = False
+    verify_requested: bool = False
 
 
 @dataclass
 class SessionPipelineState:
     session_id: str
 
-    # ── AKS state ────────────────────────────────────────────────────────
-    prev_gray: Optional[Any] = None           # grayscale of last received frame (np.ndarray)
-    aks_skip_remaining: int = 0              # frames still to skip
-    total_frames_received: int = 0
-    total_frames_processed: int = 0
+    # ── Model 1: capture / AKS ──────────────────────────────────────────
+    prev_small: Optional[Any] = None       # grayscale 320-px copy of last processed frame
+    consecutive_skips: int = 0
+    frames_captured: int = 0
+    frames_processed: int = 0
+    frames_skipped_dup: int = 0
+    frames_dropped_busy: int = 0
+    capture_times: deque = field(default_factory=lambda: deque(maxlen=20))
 
-    # ── SORT tracker (Head 5) ────────────────────────────────────────────
-    sort_tracker: Optional[Any] = None       # lazy-loaded Sort instance
-    stalled_counters: Dict[int, int] = field(default_factory=dict)
-    prev_centroids: Dict[int, tuple] = field(default_factory=dict)
+    # ── H5 SORT vehicle tracker ─────────────────────────────────────────
+    sort_tracker: Optional[Any] = None
+    vehicle_hist: Dict[int, dict] = field(default_factory=dict)
 
-    # ── Timing ───────────────────────────────────────────────────────────
+    # ── Hazard tracks (persistence + report-once) ───────────────────────
+    hazard_tracks: list = field(default_factory=list)
+    next_track_id: int = 1
+
     created_at: float = field(default_factory=time.time)
-    last_used:  float = field(default_factory=time.time)
+    last_used: float = field(default_factory=time.time)
 
     def touch(self):
         self.last_used = time.time()
 
     def is_expired(self) -> bool:
-        ttl_seconds = config.SESSION_TTL_MIN * 60
-        return (time.time() - self.last_used) > ttl_seconds
+        return (time.time() - self.last_used) > config.SESSION_TTL_MIN * 60
 
     def get_tracker(self):
-        """Lazy-init the SORT tracker."""
         if self.sort_tracker is None:
-            try:
-                import sys
-                if str(config.STALLED_DIR) not in sys.path:
-                    sys.path.insert(0, str(config.STALLED_DIR))
-                from sort import Sort
-                self.sort_tracker = Sort(max_age=30, min_hits=5, iou_threshold=0.3)
-            except Exception as e:
-                print(f"[Session {self.session_id}] SORT unavailable: {e}")
+            import sys
+            if str(config.STALLED_DIR) not in sys.path:
+                sys.path.insert(0, str(config.STALLED_DIR))
+            from sort import Sort
+            # processed frames arrive ~1/s, so tracks must survive with few hits
+            self.sort_tracker = Sort(max_age=4, min_hits=1, iou_threshold=0.2)
         return self.sort_tracker
 
-    def aks_check(self, frame_bgr, speed_kmh: float = 0.0) -> tuple:
-        """
-        Adaptive Keyframe Sampling.
-        Returns (should_process: bool, motion_score: float).
-        motion_score is the mean pixel diff vs previous frame (0 = no motion).
-        """
-        import cv2
-        import numpy as np
-        self.total_frames_received += 1
+    def note_capture(self):
+        self.frames_captured += 1
+        self.capture_times.append(time.time())
 
-        if self.prev_gray is None:
-            self.prev_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-            self.total_frames_processed += 1
-            return True, 0.0
+    def measured_fps(self) -> float:
+        t = list(self.capture_times)
+        if len(t) < 2 or t[-1] == t[0]:
+            return 0.0
+        return round((len(t) - 1) / (t[-1] - t[0]), 2)
 
-        if self.aks_skip_remaining > 0:
-            self.aks_skip_remaining -= 1
-            self.prev_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-            return False, 0.0
+    def match_hazard(self, hazard_type: str, bbox: list) -> HazardTrack:
+        frame = self.frames_processed
+        best, best_iou = None, 0.0
+        for tr in self.hazard_tracks:
+            if tr.hazard_type != hazard_type or frame - tr.last_frame > 10:
+                continue
+            v = iou(tr.bbox, bbox)
+            if v > best_iou:
+                best, best_iou = tr, v
+        if best is not None and best_iou >= 0.2:
+            if best.last_frame != frame:
+                best.hits += 1
+            best.bbox, best.last_frame = bbox, frame
+            return best
+        tr = HazardTrack(id=self.next_track_id, hazard_type=hazard_type, bbox=bbox, last_frame=frame)
+        self.next_track_id += 1
+        self.hazard_tracks.append(tr)
+        self.hazard_tracks = [t for t in self.hazard_tracks if frame - t.last_frame <= 30]
+        return tr
 
-        curr_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        diff = cv2.absdiff(self.prev_gray, curr_gray)
-        motion_score = float(np.mean(diff))
-        self.prev_gray = curr_gray
-
-        if motion_score >= config.AKS_MOTION_THRESHOLD:
-            self.total_frames_processed += 1
-            return True, motion_score
-
-        if speed_kmh < config.AKS_SPEED_SLOW_KMH:
-            self.aks_skip_remaining = config.AKS_SLOW_SKIP
-        elif speed_kmh < config.AKS_SPEED_MEDIUM_KMH:
-            self.aks_skip_remaining = config.AKS_MEDIUM_SKIP
-
-        self.total_frames_processed += 1
-        return True, motion_score
-
-    def aks_should_process(self, frame_bgr, speed_kmh: float = 0.0) -> bool:
-        """Compatibility wrapper — returns only the bool decision."""
-        ok, _ = self.aks_check(frame_bgr, speed_kmh)
-        return ok
-
-    def aks_stats(self) -> dict:
-        received  = max(1, self.total_frames_received)
-        processed = self.total_frames_processed
-        saved_pct = round((1 - processed / received) * 100, 1)
+    def stats(self) -> dict:
+        cap = max(1, self.frames_captured)
         return {
-            "frames_received":  received,
-            "frames_processed": processed,
-            "frames_skipped":   received - processed,
-            "compute_saving_pct": saved_pct,
+            "frames_captured": self.frames_captured,
+            "frames_processed": self.frames_processed,
+            "frames_skipped_duplicate": self.frames_skipped_dup,
+            "frames_dropped_busy": self.frames_dropped_busy,
+            "compute_saving_pct": round((1 - self.frames_processed / cap) * 100, 1),
+            "measured_capture_fps": self.measured_fps(),
         }
 
-
-# ── Global registry ────────────────────────────────────────────────────────
 
 _store: Dict[str, SessionPipelineState] = {}
 _lock = threading.Lock()
@@ -114,9 +122,9 @@ def get(session_id: str) -> SessionPipelineState:
     with _lock:
         if session_id not in _store:
             _store[session_id] = SessionPipelineState(session_id=session_id)
-        state = _store[session_id]
-        state.touch()
-        return state
+        s = _store[session_id]
+        s.touch()
+        return s
 
 
 def remove(session_id: str) -> None:
@@ -125,7 +133,6 @@ def remove(session_id: str) -> None:
 
 
 def cleanup_expired() -> int:
-    """Remove sessions that haven't been used within the TTL. Returns count removed."""
     with _lock:
         stale = [sid for sid, s in _store.items() if s.is_expired()]
         for sid in stale:

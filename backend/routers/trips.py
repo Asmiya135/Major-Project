@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 import database
+from services import edge_store
 
 router = APIRouter(tags=["trips"])
 
@@ -58,7 +59,11 @@ def get_trip_summary(session_id: str):
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found")
     detections = database.get_trip_detections(session_id)
-    pending = database.get_pending_feedback(session_id)
+    pending = [
+        {"detection_id": v["id"], "hazard_id": v["id"], "hazard_type": v["payload"].get("hazard_type"),
+         "timestamp": v["created_at"]}
+        for v in edge_store.list_verify("pending")
+    ]
 
     types_seen = {}
     for d in detections:

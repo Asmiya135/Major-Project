@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { AlertTriangle, ChevronRight } from 'lucide-react';
+import { AlertTriangle, ChevronRight, Mic, MicOff } from 'lucide-react';
 import { OlaMap, type HazardMarker } from './OlaMap';
+import { API_BASE } from '../../api/client';
 import type { NavigationStep, TransportMode } from '../../api/olamaps';
 
 // ── Haversine distance (metres) ────────────────────────────────────────────
@@ -48,6 +49,13 @@ const MODE_ICON: Record<TransportMode, string> = {
 
 // ── Props ──────────────────────────────────────────────────────────────────
 
+export interface VoiceVerifyRequest {
+  hazardId:    number;
+  hazardType:  string;
+  confidence:  number;
+  sessionId:   string;
+}
+
 interface Props {
   steps:       NavigationStep[];
   routeCoords: [number, number][];
@@ -60,6 +68,8 @@ interface Props {
   alertSev?:   'high' | 'medium' | 'low';
   onDismissAlert?: () => void;
   onEndTrip:   () => void;
+  voiceVerifyReq?: VoiceVerifyRequest | null;
+  onVoiceVerifyDone?: (response: 'yes' | 'no' | 'unsure') => void;
 }
 
 // ── Component ──────────────────────────────────────────────────────────────
@@ -67,6 +77,7 @@ interface Props {
 export function NavigationView({
   steps, routeCoords, userLngLat, hazards, speedKmh, mode,
   destination, alertText, alertSev = 'high', onDismissAlert, onEndTrip,
+  voiceVerifyReq, onVoiceVerifyDone,
 }: Props) {
   const [stepIdx,      setStepIdx]      = useState(0);
   const [distToTurn,   setDistToTurn]   = useState(0);
@@ -110,6 +121,59 @@ export function NavigationView({
   const nextStep = steps[stepIdx + 1];
   const arrow    = ARROW[curStep?.maneuver ?? ''] ?? '↑';
   const isLast   = stepIdx >= steps.length - 1;
+
+  // ── Voice verification (for MEDIUM confidence hazards) ────────────────
+  const [vrRecording, setVrRecording] = useState(false);
+  const [vrTranscript, setVrTranscript] = useState<string | null>(null);
+  const vrMediaRef  = useRef<MediaRecorder | null>(null);
+  const vrStreamRef = useRef<MediaStream | null>(null);
+
+  // Reset voice state when a new verification request arrives
+  useEffect(() => {
+    if (voiceVerifyReq) { setVrTranscript(null); setVrRecording(false); }
+  }, [voiceVerifyReq?.hazardId]);
+
+  const startVoiceRecord = useCallback(async () => {
+    if (!voiceVerifyReq) return;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
+    if (!stream) return;
+    vrStreamRef.current = stream;
+    const mr     = new MediaRecorder(stream);
+    const chunks: Blob[] = [];
+    mr.ondataavailable = (e) => chunks.push(e.data);
+    mr.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      const blob = new Blob(chunks, { type: 'audio/webm' });
+      const ab   = await blob.arrayBuffer();
+      const b64  = btoa(String.fromCharCode(...new Uint8Array(ab)));
+
+      // POST to voice verify endpoint
+      try {
+        const form = new FormData();
+        form.append('session_id', voiceVerifyReq.sessionId);
+        form.append('hazard_id',  String(voiceVerifyReq.hazardId));
+        const audioBlob = new Blob([ab], { type: 'audio/webm' });
+        form.append('audio', audioBlob, 'verify.webm');
+        const res  = await fetch(`${API_BASE}/api/verify/${voiceVerifyReq.hazardId}/voice`, {
+          method: 'POST', body: form,
+        });
+        const data = await res.json();
+        setVrTranscript(data.transcript ?? '');
+        onVoiceVerifyDone?.(data.response ?? 'unsure');
+      } catch {
+        setVrTranscript('(could not transcribe)');
+        onVoiceVerifyDone?.('unsure');
+      }
+    };
+    vrMediaRef.current = mr;
+    mr.start();
+    setVrRecording(true);
+  }, [voiceVerifyReq, onVoiceVerifyDone]);
+
+  const stopVoiceRecord = useCallback(() => {
+    vrMediaRef.current?.stop();
+    setVrRecording(false);
+  }, []);
 
   // ── Render ──────────────────────────────────────────────────────────────
   return (
@@ -180,6 +244,59 @@ export function NavigationView({
               style={{ background: 'none', border: 'none', color: '#fff',
                        fontSize: 18, cursor: 'pointer', lineHeight: 1 }}>✕</button>
           )}
+        </div>
+      )}
+
+      {/* ── Voice verification overlay (MEDIUM confidence) ─────────── */}
+      {voiceVerifyReq && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 200,
+          background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
+        }}>
+          <div style={{
+            background: '#1c1c1e', borderRadius: 20, padding: 28,
+            maxWidth: 360, width: '100%', border: '1px solid rgba(255,165,0,0.4)',
+            boxShadow: '0 0 40px rgba(255,165,0,0.2)',
+          }}>
+            <div style={{ fontSize: 40, textAlign: 'center', marginBottom: 12 }}>⚠️</div>
+            <div style={{ fontSize: 16, fontWeight: 700, textAlign: 'center', marginBottom: 6 }}>
+              Verify Hazard Detection
+            </div>
+            <div style={{ fontSize: 13, color: '#9ca3af', textAlign: 'center', marginBottom: 20, lineHeight: 1.5 }}>
+              Medium confidence ({Math.round(voiceVerifyReq.confidence * 100)}%) —
+              possible <b style={{ color: '#fff' }}>{voiceVerifyReq.hazardType.replace('_', ' ')}</b>.
+              <br />Did you actually see this hazard?
+            </div>
+
+            {vrTranscript !== null ? (
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: 12, color: '#9ca3af', marginBottom: 6 }}>
+                  You said: <span style={{ color: '#fff', fontStyle: 'italic' }}>"{vrTranscript}"</span>
+                </div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: '#10b981' }}>Response recorded ✓</div>
+              </div>
+            ) : (
+              <button
+                onMouseDown={startVoiceRecord}
+                onMouseUp={stopVoiceRecord}
+                onTouchStart={startVoiceRecord}
+                onTouchEnd={stopVoiceRecord}
+                style={{
+                  width: '100%', padding: '16px 0',
+                  background: vrRecording ? '#dc2626' : '#d97706',
+                  border: 'none', borderRadius: 14,
+                  color: '#fff', fontWeight: 700, fontSize: 15,
+                  cursor: 'pointer', display: 'flex', alignItems: 'center',
+                  justifyContent: 'center', gap: 10,
+                  animation: vrRecording ? 'pulse 1s infinite' : 'none',
+                }}
+              >
+                {vrRecording ? <MicOff size={18} /> : <Mic size={18} />}
+                {vrRecording ? 'Recording… release when done' : 'Hold & say "Yes" or "No"'}
+              </button>
+            )}
+          </div>
         </div>
       )}
 

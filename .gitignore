@@ -10,3 +10,7 @@ build/
 .env
 .env.*
 .ipynb_checkpoints/
+# runtime data (demo)
+server/data/
+backend/client_data/
+*_test.log

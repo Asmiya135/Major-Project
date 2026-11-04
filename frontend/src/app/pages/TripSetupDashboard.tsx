@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router';
-import { Search, MapPin, Navigation, CheckCircle2, Loader2, Settings, XCircle, Clock, Route } from 'lucide-react';
+import { Search, MapPin, Navigation, CheckCircle2, Loader2, Settings, XCircle, Clock, Route, LocateFixed, Video, Play } from 'lucide-react';
 import { OlaMap, type HazardMarker } from '../components/OlaMap';
 import { HazardIcon } from '../components/HazardIcon';
 import { SeverityBadge } from '../components/SeverityBadge';
@@ -8,19 +8,91 @@ import { TransportModePicker } from '../components/TransportModePicker';
 import { useHazards } from '../../hooks/useHazards';
 import { useTrip } from '../../hooks/useTrip';
 import { fetchSystemStatus } from '../../api/feedback';
+import { edge, type RouteHazard } from '../../api/edge';
 import { autocomplete, getDirections } from '../../api/olamaps';
 import type { Prediction, DirectionsResult, TransportMode } from '../../api/olamaps';
 import type { SystemStatus } from '../../api/types';
 
-const DEFAULT_ORIGIN = { lat: 19.076, lng: 72.8777 };   // Mumbai fallback
+const MUMBAI_FALLBACK = { lat: 19.076, lng: 72.8777 };
+
+function fmtAlong(m?: number) {
+  if (m == null) return '—';
+  return m < 1000 ? `${Math.round(m)} m` : `${(m / 1000).toFixed(1)} km`;
+}
 
 const HAZARD_LABELS: Record<string, string> = {
   pothole: 'Pothole', debris: 'Debris', bump: 'Bump',
-  stalled_vehicle: 'Stalled Vehicle', flood: 'Flood',
+  stalled_vehicle: 'Stalled Vehicle', flood: 'Flood', speed_bump: 'Speed bump',
 };
 
 export default function TripSetupDashboard() {
   const navigate = useNavigate();
+
+  // ── Current user location (GPS + manual fallback) ─────────────────────
+  const [currentLoc,  setCurrentLoc]  = useState<{ lat: number; lng: number } | null>(null);
+  const [locLabel,    setLocLabel]    = useState('Detecting your location…');
+  const [locLoading,  setLocLoading]  = useState(true);
+  const [locDenied,   setLocDenied]   = useState(false);
+
+  // Origin search (shown when GPS is denied)
+  const [originQuery,       setOriginQuery]       = useState('');
+  const [originSuggestions, setOriginSuggestions] = useState<Prediction[]>([]);
+  const [originOpen,        setOriginOpen]        = useState(false);
+  const [originLoading,     setOriginLoading]     = useState(false);
+  const originDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const tryGeolocation = useCallback(() => {
+    if (!navigator.geolocation) {
+      setLocDenied(true);
+      setLocLabel('GPS unavailable — search your start location');
+      setLocLoading(false);
+      return;
+    }
+    setLocLoading(true);
+    setLocDenied(false);
+    setLocLabel('Detecting your location…');
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setCurrentLoc({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        setLocLabel('Your current location');
+        setLocLoading(false);
+        setLocDenied(false);
+      },
+      () => {
+        setLocDenied(true);
+        setLocLabel('Location denied — search your start point below');
+        setLocLoading(false);
+      },
+      { enableHighAccuracy: true, timeout: 8000 },
+    );
+  }, []);
+
+  useEffect(() => { tryGeolocation(); }, [tryGeolocation]);
+
+  // Autocomplete for manual origin search
+  const handleOriginSearch = useCallback((v: string) => {
+    setOriginQuery(v);
+    if (originDebounceRef.current) clearTimeout(originDebounceRef.current);
+    if (v.length < 2) { setOriginSuggestions([]); return; }
+    setOriginLoading(true);
+    originDebounceRef.current = setTimeout(async () => {
+      const res = await autocomplete(v);
+      setOriginSuggestions(res);
+      setOriginOpen(res.length > 0);
+      setOriginLoading(false);
+    }, 300);
+  }, []);
+
+  const handleSelectOrigin = useCallback((p: Prediction) => {
+    setOriginOpen(false);
+    const label = p.structured_formatting?.main_text ?? p.description;
+    setOriginQuery(label);
+    setCurrentLoc({ lat: p.geometry.location.lat, lng: p.geometry.location.lng });
+    setLocLabel(label);
+    setLocDenied(false);
+  }, []);
+
+  const origin = currentLoc ?? MUMBAI_FALLBACK;
 
   // ── Destination ─────────────────────────────────────────────────────────
   const [query,           setQuery]           = useState('');
@@ -45,7 +117,7 @@ export default function TripSetupDashboard() {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Live hazards from backend ─────────────────────────────────────────
-  const { hazards, loading: hazardsLoading } = useHazards({ since_hours: 24 });
+  const { hazards, loading: hazardsLoading } = useHazards({ pollInterval: 5000 });
   const { start, starting } = useTrip();
 
   // ── System status ─────────────────────────────────────────────────────
@@ -90,11 +162,23 @@ export default function TripSetupDashboard() {
     };
     setSelectedDest(dest);
     setLoadingRoute(true);
-    const dir = await getDirections(DEFAULT_ORIGIN, dest, 'driving');
+    const dir = await getDirections(origin, dest, 'driving');
     setDirections(dir);
     setSelectedMode('driving');
     setLoadingRoute(false);
-  }, []);
+  }, [origin]);
+
+  // Start location changed after the destination was picked → recompute the route
+  useEffect(() => {
+    if (!selectedDest || !currentLoc) return;
+    let cancelled = false;
+    setLoadingRoute(true);
+    getDirections(currentLoc, selectedDest, selectedMode).then((dir) => {
+      if (!cancelled) { setDirections(dir); setLoadingRoute(false); }
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentLoc]);
 
   // ── Mode picker callback ──────────────────────────────────────────────
   const handleModeSelect = useCallback((mode: TransportMode, res: DirectionsResult) => {
@@ -117,15 +201,47 @@ export default function TripSetupDashboard() {
     } catch { navigate('/drive'); }
   };
 
+  const handleStartDemo = async () => {
+    if (!directions) return;
+    let sid: string | undefined;
+    try { sid = await start(); } catch { /* trip log is optional for the demo */ }
+    navigate('/drive', {
+      state: { sessionId: sid, destination: selectedDest, directions, mode: selectedMode, demo: true },
+    });
+  };
+
+  // ── Hazards lying on the planned route (server → cached on the car) ──
+  const [routeHz, setRouteHz] = useState<{ source: string; hazards: RouteHazard[] } | null>(null);
+  const [routeHzLoading, setRouteHzLoading] = useState(false);
+  useEffect(() => {
+    const coords = directions?.routeCoords;
+    if (!coords || coords.length < 2) { setRouteHz(null); return; }
+    setRouteHzLoading(true);
+    edge.routeHazards(coords)
+      .then(setRouteHz)
+      .catch(() => setRouteHz(null))
+      .finally(() => setRouteHzLoading(false));
+  }, [directions]);
+
+  const routeMarkers: HazardMarker[] = (routeHz?.hazards ?? []).map((h) => ({
+    id: String(h.id), type: h.hazard_type as HazardMarker['type'], severity: h.severity as HazardMarker['severity'],
+    latitude: h.latitude, longitude: h.longitude, reports: h.count, confidence: h.confidence,
+    first_seen: h.first_seen, last_seen: h.last_seen,
+    label: `${fmtAlong(h.distance_along_m)} along route${h.verified ? ' · verified ✓' : ''}`,
+  }));
+
   // ── Map markers ───────────────────────────────────────────────────────
-  const mapHazards: HazardMarker[] = hazards.map((h) => ({
-    id:        String(h.id),
-    type:      h.hazard_type as HazardMarker['type'],
-    severity:  h.severity   as HazardMarker['severity'],
-    latitude:  h.latitude,
-    longitude: h.longitude,
-    reports:   h.count,
-    label:     h.verified ? 'Verified' : undefined,
+  const mapHazards: HazardMarker[] = routeHz ? routeMarkers : hazards.map((h) => ({
+    id:         String(h.id),
+    type:       h.hazard_type as HazardMarker['type'],
+    severity:   h.severity    as HazardMarker['severity'],
+    latitude:   h.latitude,
+    longitude:  h.longitude,
+    reports:    h.count,
+    confidence: h.confidence,
+    first_seen: h.first_seen,
+    last_seen:  h.last_seen,
+    label:      h.verified ? 'Verified ✓' : undefined,
   }));
 
   return (
@@ -144,6 +260,79 @@ export default function TripSetupDashboard() {
             <p className="text-xs text-muted-foreground">AI hazard detection</p>
           </div>
         </div>
+
+        {/* Current location — GPS detected */}
+        {!locDenied && (
+          <div className={`mb-4 flex items-center gap-2.5 rounded-xl px-3 py-2.5 border ${
+            locLoading ? 'bg-gray-50 border-gray-200' : 'bg-green-50 border-green-200'
+          }`}>
+            {locLoading
+              ? <Loader2 className="w-4 h-4 text-gray-400 animate-spin flex-shrink-0" />
+              : <LocateFixed className="w-4 h-4 text-green-600 flex-shrink-0" />
+            }
+            <div className="min-w-0 flex-1">
+              <div className={`text-xs font-semibold ${locLoading ? 'text-gray-500' : 'text-green-800'}`}>FROM</div>
+              <div className={`text-sm truncate ${locLoading ? 'text-gray-400' : 'text-green-700'}`}>{locLabel}</div>
+            </div>
+            {!locLoading && (
+              <button onClick={tryGeolocation} title="Re-detect location"
+                className="p-1 rounded-lg hover:bg-green-100 transition-colors flex-shrink-0">
+                <LocateFixed className="w-3.5 h-3.5 text-green-600" />
+              </button>
+            )}
+            <button onClick={() => setLocDenied(true)}
+              className="text-xs text-[#001E50] hover:underline flex-shrink-0">Change</button>
+          </div>
+        )}
+
+        {/* Manual origin search — shown when GPS is denied */}
+        {locDenied && (
+          <div className="mb-4 relative">
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-sm font-medium">From (start location)</label>
+              <button onClick={tryGeolocation}
+                className="flex items-center gap-1 text-xs text-[#001E50] hover:underline">
+                <LocateFixed className="w-3 h-3" />Use GPS
+              </button>
+            </div>
+            <div className="relative">
+              <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+              {originLoading && <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 animate-spin text-muted-foreground" />}
+              <input
+                type="text"
+                value={originQuery}
+                onChange={(e) => handleOriginSearch(e.target.value)}
+                onFocus={() => originSuggestions.length > 0 && setOriginOpen(true)}
+                onBlur={() => setTimeout(() => setOriginOpen(false), 180)}
+                placeholder="Search your starting point…"
+                className="w-full pl-9 pr-9 py-2.5 bg-gray-50 rounded-xl border border-border focus:outline-none focus:ring-2 focus:ring-[#001E50]/20 text-sm"
+              />
+            </div>
+            {originOpen && originSuggestions.length > 0 && (
+              <div className="absolute z-50 mt-1 w-full bg-white border border-border rounded-xl shadow-xl overflow-hidden">
+                {originSuggestions.slice(0, 5).map((s) => (
+                  <button key={s.place_id} type="button"
+                    className="w-full px-4 py-3 flex items-start gap-3 hover:bg-gray-50 transition-colors text-left border-b border-border/50 last:border-b-0"
+                    onMouseDown={() => handleSelectOrigin(s)}
+                  >
+                    <MapPin className="w-4 h-4 text-[#001E50] mt-0.5 flex-shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium truncate">{s.structured_formatting?.main_text ?? s.description}</div>
+                      {s.structured_formatting?.secondary_text && (
+                        <div className="text-xs text-muted-foreground truncate">{s.structured_formatting.secondary_text}</div>
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+            {currentLoc && (
+              <div className="mt-1.5 flex items-center gap-1.5 text-xs text-green-700">
+                <CheckCircle2 className="w-3.5 h-3.5" />{locLabel}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Destination search */}
         <div className="mb-5 relative">
@@ -186,7 +375,7 @@ export default function TripSetupDashboard() {
           <div className="mb-5">
             <label className="block mb-2 text-sm font-medium">Transport Mode</label>
             <TransportModePicker
-              origin={DEFAULT_ORIGIN}
+              origin={origin}
               destination={selectedDest}
               selected={selectedMode}
               onSelect={handleModeSelect}
@@ -228,19 +417,26 @@ export default function TripSetupDashboard() {
           <div className="border-t border-border pt-3">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-medium text-muted-foreground">HAZARDS ON ROUTE</span>
-              {hazardsLoading && <Loader2 className="w-3 h-3 animate-spin" />}
+              {(hazardsLoading || routeHzLoading) && <Loader2 className="w-3 h-3 animate-spin" />}
+              {routeHz && !routeHzLoading && (
+                <span className="text-[10px] text-muted-foreground">
+                  {routeHz.source === 'server' ? 'downloaded from server · cached on car' : 'offline — from car cache'}
+                </span>
+              )}
             </div>
-            {mapHazards.slice(0, 3).length === 0 && !hazardsLoading ? (
+            {!directions ? (
+              <p className="text-xs text-muted-foreground py-1">Pick a destination to download hazards along the route</p>
+            ) : routeMarkers.length === 0 && !routeHzLoading ? (
               <p className="text-xs text-muted-foreground py-1">No known hazards on this route</p>
             ) : (
-              <div className="space-y-2">
-                {mapHazards.slice(0, 3).map((h, i) => (
+              <div className="space-y-2 max-h-56 overflow-y-auto">
+                {routeMarkers.map((h, i) => (
                   <div key={h.id} className="flex items-center gap-2.5 p-2.5 bg-background rounded-lg">
                     <div className={`p-1.5 rounded-lg flex-shrink-0 ${
                       h.severity === 'high' ? 'bg-red-100' : h.severity === 'medium' ? 'bg-orange-100' : 'bg-yellow-100'
                     }`}>
                       <HazardIcon
-                        type={h.type === 'stalled_vehicle' || h.type === 'bump' ? 'debris' : h.type}
+                        type={h.type === 'pothole' || h.type === 'flood' ? h.type : 'debris'}
                         className={`w-3.5 h-3.5 ${
                           h.severity === 'high' ? 'text-red-600' : h.severity === 'medium' ? 'text-orange-600' : 'text-yellow-600'
                         }`}
@@ -252,7 +448,7 @@ export default function TripSetupDashboard() {
                         <SeverityBadge severity={h.severity} />
                       </div>
                       <div className="text-xs text-muted-foreground">
-                        {((i + 1) * 2.4).toFixed(1)} km ahead
+                        {fmtAlong(routeHz?.hazards[i]?.distance_along_m)} along route
                         {h.reports ? ` · ${h.reports} report${h.reports !== 1 ? 's' : ''}` : ''}
                       </div>
                     </div>
@@ -316,16 +512,35 @@ export default function TripSetupDashboard() {
             </span>
           ) : allReady ? 'Start Navigation' : 'Preparing System…'}
         </button>
+
+        {/* Demo: simulated drive along this route with a pre-mapped hazard */}
+        <button onClick={handleStartDemo} disabled={!directions || starting}
+          title={directions ? 'Car drives itself along the route; a pre-mapped hazard is detected and shared over Bluetooth' : 'Pick a destination first'}
+          className={`w-full mt-2 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 ${
+            directions ? 'bg-orange-500 text-white hover:bg-orange-600 shadow' : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+          }`}>
+          <Play className="w-4 h-4" />Demo drive (simulated road)
+        </button>
+
+        {/* Test Dashcam */}
+        <button
+          onClick={() => navigate('/pipeline')}
+          className="w-full mt-2 py-3 rounded-xl border-2 border-[#001E50] text-[#001E50] text-sm font-semibold hover:bg-[#001E50]/5 transition-colors flex items-center justify-center gap-2"
+        >
+          <Video className="w-4 h-4" />
+          Test Dashcam Pipeline
+        </button>
       </div>
 
       {/* ── Map panel ─────────────────────────────────────────────────── */}
       <div className="flex-1 h-64 md:h-full relative">
         <OlaMap
-          center={[DEFAULT_ORIGIN.lng, DEFAULT_ORIGIN.lat]}
+          center={[origin.lng, origin.lat]}
           zoom={13}
           hazards={mapHazards}
           routeCoords={directions?.routeCoords}
           destination={selectedDest ?? undefined}
+          userPosition={currentLoc ? [currentLoc.lng, currentLoc.lat] : undefined}
           className="h-full rounded-none"
         />
 
@@ -387,6 +602,7 @@ export default function TripSetupDashboard() {
           </div>
         )}
       </div>
+
     </div>
   );
 }

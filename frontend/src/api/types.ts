@@ -1,4 +1,4 @@
-export type HazardType = 'pothole' | 'debris' | 'bump' | 'stalled_vehicle' | 'flood';
+export type HazardType = 'pothole' | 'debris' | 'bump' | 'speed_bump' | 'stalled_vehicle' | 'flood';
 export type Severity = 'low' | 'medium' | 'high';
 export type FeedbackResponse = 'yes' | 'no' | 'unsure';
 

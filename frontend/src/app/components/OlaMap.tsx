@@ -24,12 +24,15 @@ function olaTx(url: string): maplibregl.RequestParameters {
 
 export interface HazardMarker {
   id: string;
-  type: 'pothole' | 'flood' | 'debris' | 'bump' | 'stalled_vehicle';
+  type: 'pothole' | 'flood' | 'debris' | 'bump' | 'speed_bump' | 'stalled_vehicle';
   severity: 'low' | 'medium' | 'high';
   latitude: number;
   longitude: number;
   label?: string;
   reports?: number;
+  confidence?: number;
+  first_seen?: string;
+  last_seen?: string;
 }
 
 interface OlaMapProps {
@@ -45,7 +48,7 @@ interface OlaMapProps {
 
 const SEV: Record<string, string> = { high: '#ef4444', medium: '#f97316', low: '#eab308' };
 const ICON: Record<string, string> = {
-  pothole: '🕳️', flood: '🌊', debris: '⚠️', bump: '🔺', stalled_vehicle: '🚗',
+  pothole: '🕳️', flood: '🌊', debris: '⚠️', bump: '🔺', speed_bump: '🔺', stalled_vehicle: '🚗',
 };
 
 // ── Component ──────────────────────────────────────────────────────────────
@@ -163,33 +166,148 @@ export function OlaMap({
     markersRef.current = [];
 
     hazards.forEach((h) => {
-      const el = document.createElement('div');
       const bg = SEV[h.severity] ?? '#f97316';
-      el.style.cssText = `
-        width:30px;height:30px;border-radius:50%;
-        background:${bg};border:2.5px solid #fff;
-        box-shadow:0 2px 10px rgba(0,0,0,.35);
-        display:flex;align-items:center;justify-content:center;
-        font-size:13px;cursor:pointer;
-        transition:transform .15s ease;
-      `;
-      el.textContent = ICON[h.type] ?? '⚠️';
-      el.onmouseenter = () => { el.style.transform = 'scale(1.3)'; };
-      el.onmouseleave = () => { el.style.transform = ''; };
 
+      // Outer wrapper — fixed size, never transforms, acts as anchor
+      const wrapper = document.createElement('div');
+      wrapper.style.cssText = `
+        width:34px;height:34px;
+        position:relative;cursor:pointer;
+      `;
+
+      // Inner visible circle — only this scales on hover
+      const circle = document.createElement('div');
+      circle.style.cssText = `
+        width:34px;height:34px;border-radius:50%;
+        background:${bg};border:2.5px solid #fff;
+        box-shadow:0 2px 10px rgba(0,0,0,.4);
+        display:flex;align-items:center;justify-content:center;
+        font-size:14px;
+        transition:transform .15s ease, box-shadow .15s ease;
+        pointer-events:none;
+      `;
+      circle.textContent = ICON[h.type] ?? '⚠️';
+      wrapper.appendChild(circle);
+
+      // Hover: scale only the inner circle, wrapper stays fixed
+      wrapper.onmouseenter = () => {
+        circle.style.transform = 'scale(1.25)';
+        circle.style.boxShadow = `0 4px 16px rgba(0,0,0,.5)`;
+      };
+      wrapper.onmouseleave = () => {
+        circle.style.transform = '';
+        circle.style.boxShadow = `0 2px 10px rgba(0,0,0,.4)`;
+      };
+
+      // Confidence bar width
+      const conf = typeof h.confidence === 'number' ? h.confidence : 0.75;
+      const confPct = Math.round(conf * 100);
+      const confColor = confPct >= 75 ? '#ef4444' : confPct >= 40 ? '#f97316' : '#eab308';
+
+      // Severity pill colours
+      const sevBgMap: Record<string, string> = { high: '#fee2e2', medium: '#ffedd5', low: '#fef9c3' };
+      const sevTxtMap: Record<string, string> = { high: '#b91c1c', medium: '#c2410c', low: '#854d0e' };
+      const sevBg  = sevBgMap[h.severity]  ?? '#f1f5f9';
+      const sevTxt = sevTxtMap[h.severity] ?? '#475569';
+
+      // Format ISO UTC timestamp → local readable
+      const fmt = (iso?: string) => {
+        if (!iso) return '—';
+        try {
+          const d = new Date(iso.endsWith('Z') ? iso : iso + 'Z');
+          return d.toLocaleString(undefined, {
+            day: '2-digit', month: 'short', year: 'numeric',
+            hour: '2-digit', minute: '2-digit', hour12: true,
+          });
+        } catch { return iso; }
+      };
+
+      const firstSeen = fmt(h.first_seen);
+      const lastSeen  = fmt(h.last_seen);
+      const isNew     = h.first_seen === h.last_seen || !h.last_seen;
+
+      // Rich analytics popup — click to open, fixed to coordinate
       const popup = new maplibregl.Popup({
-        offset: 18, closeButton: false, maxWidth: '200px', className: 'ola-pop',
+        offset: [0, -20],
+        closeButton: true,
+        closeOnClick: false,
+        maxWidth: '260px',
+        className: 'ola-pop',
+        anchor: 'bottom',
       }).setHTML(`
-        <div style="font:13px/1.6 system-ui,sans-serif">
-          <b style="text-transform:capitalize">${h.type.replace('_', ' ')}</b><br>
-          <span style="color:${bg};font-size:11px">${h.severity} severity</span>
-          ${h.reports ? `<br><span style="color:#888;font-size:11px">${h.reports} report${h.reports !== 1 ? 's' : ''}</span>` : ''}
-          ${h.label ? `<br><span style="font-size:11px">${h.label}</span>` : ''}
+        <div style="font:13px/1.6 system-ui,sans-serif;padding:2px 0">
+
+          <!-- Header: icon + name + severity pill -->
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+            <div style="width:32px;height:32px;border-radius:50%;background:${bg};
+                        display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0">
+              ${ICON[h.type] ?? '⚠️'}
+            </div>
+            <div style="flex:1;min-width:0">
+              <div style="font-weight:700;font-size:14px;text-transform:capitalize;line-height:1.2">
+                ${h.type.replace(/_/g, ' ')}
+              </div>
+              <span style="display:inline-block;margin-top:2px;padding:1px 8px;border-radius:20px;
+                           font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;
+                           background:${sevBg};color:${sevTxt}">
+                ${h.severity} severity
+              </span>
+            </div>
+          </div>
+
+          <!-- Confidence bar -->
+          <div style="background:#f8fafc;border-radius:8px;padding:8px 10px;margin-bottom:8px">
+            <div style="display:flex;justify-content:space-between;font-size:11px;color:#64748b;margin-bottom:4px">
+              <span>Confidence</span>
+              <span style="font-weight:700;color:#1e293b">${confPct}%</span>
+            </div>
+            <div style="height:5px;background:#e2e8f0;border-radius:3px;overflow:hidden">
+              <div style="height:100%;width:${confPct}%;background:${confColor};border-radius:3px"></div>
+            </div>
+
+            ${h.reports != null ? `
+            <div style="display:flex;justify-content:space-between;font-size:11px;color:#64748b;margin-top:5px">
+              <span>Reports</span><span style="font-weight:700;color:#1e293b">${h.reports}</span>
+            </div>` : ''}
+          </div>
+
+          <!-- Timestamps -->
+          <div style="background:#f8fafc;border-radius:8px;padding:8px 10px;margin-bottom:8px">
+            <div style="display:flex;align-items:flex-start;gap:6px;margin-bottom:${isNew ? '0' : '5px'}">
+              <span style="font-size:12px;flex-shrink:0">🕐</span>
+              <div style="flex:1">
+                <div style="font-size:10px;color:#94a3b8;font-weight:600;text-transform:uppercase;letter-spacing:.4px">
+                  First detected
+                </div>
+                <div style="font-size:11px;color:#1e293b;font-weight:600">${firstSeen}</div>
+              </div>
+            </div>
+            ${!isNew ? `
+            <div style="display:flex;align-items:flex-start;gap:6px;margin-top:4px">
+              <span style="font-size:12px;flex-shrink:0">🔄</span>
+              <div style="flex:1">
+                <div style="font-size:10px;color:#94a3b8;font-weight:600;text-transform:uppercase;letter-spacing:.4px">
+                  Last updated
+                </div>
+                <div style="font-size:11px;color:#1e293b;font-weight:600">${lastSeen}</div>
+              </div>
+            </div>` : ''}
+          </div>
+
+          ${h.label ? `
+          <div style="font-size:11px;color:#64748b;margin-bottom:6px">${h.label}</div>` : ''}
+
+          <!-- Coordinates -->
+          <div style="font-size:10px;color:#94a3b8">
+            <span style="background:#f1f5f9;padding:2px 7px;border-radius:4px">
+              ${h.latitude.toFixed(5)}, ${h.longitude.toFixed(5)}
+            </span>
+          </div>
         </div>
       `);
 
       markersRef.current.push(
-        new maplibregl.Marker({ element: el })
+        new maplibregl.Marker({ element: wrapper, anchor: 'center' })
           .setLngLat([h.longitude, h.latitude])
           .setPopup(popup)
           .addTo(map),

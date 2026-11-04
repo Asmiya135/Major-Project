@@ -1,9 +1,11 @@
-import { createBrowserRouter, Outlet, useLocation, Link } from "react-router";
+import { createBrowserRouter, Outlet, useLocation, Link, useRouteError } from "react-router";
 import { lazy, Suspense } from "react";
+import { API_BASE } from "../api/client";
 
 const TripSetupDashboard = lazy(() => import("./pages/TripSetupDashboard"));
 const DriveAndSummary    = lazy(() => import("./pages/DriveAndSummary"));
 const PipelineMonitor    = lazy(() => import("./pages/PipelineMonitor"));
+const ServerConsole      = lazy(() => import("./pages/ServerConsole"));
 
 function Spinner() {
   return (
@@ -18,6 +20,7 @@ function Spinner() {
 function Layout() {
   const { pathname } = useLocation();
   const showNav = pathname !== '/drive';
+  sessionStorage.removeItem('vw_chunk_reload');   // a page rendered fine — re-arm the one-time auto reload
   return (
     <>
       {showNav && (
@@ -37,8 +40,9 @@ function Layout() {
           </div>
 
           {[
-            { to: '/',         label: '🚗 Driver View' },
-            { to: '/pipeline', label: '🔬 Pipeline Monitor' },
+            { to: '/',         label: '🚗 Trip & Navigation' },
+            { to: '/pipeline', label: '🔬 Live Detection (on car)' },
+            { to: '/server',   label: '🌐 Global Server' },
           ].map(({ to, label }) => (
             <Link key={to} to={to} style={{
               color: pathname === to ? '#fff' : 'rgba(255,255,255,.55)',
@@ -53,6 +57,9 @@ function Layout() {
               transition: 'color .15s',
             }}>{label}</Link>
           ))}
+          <span style={{ marginLeft: 'auto', color: 'rgba(255,255,255,.6)', fontSize: 12 }}>
+            car agent: {API_BASE.replace(/^https?:\/\//, '')}
+          </span>
         </nav>
       )}
       <Suspense fallback={<Spinner />}>
@@ -62,13 +69,35 @@ function Layout() {
   );
 }
 
+/** After Vite re-bundles dependencies, lazy pages can fail to load once — reload instead of crashing. */
+function RouteError() {
+  const err = useRouteError() as Error | undefined;
+  const msg = err?.message ?? String(err);
+  if (/dynamically imported module|Importing a module script failed/i.test(msg)
+      && !sessionStorage.getItem('vw_chunk_reload')) {
+    sessionStorage.setItem('vw_chunk_reload', '1');
+    window.location.reload();
+    return <Spinner />;
+  }
+  sessionStorage.removeItem('vw_chunk_reload');
+  return (
+    <div style={{ padding: 32, fontFamily: 'system-ui' }}>
+      <h2>Something went wrong</h2>
+      <pre style={{ whiteSpace: 'pre-wrap', color: '#b91c1c' }}>{msg}</pre>
+      <button onClick={() => window.location.reload()}>Reload</button>
+    </div>
+  );
+}
+
 export const router = createBrowserRouter([
   {
     element: <Layout />,
+    errorElement: <RouteError />,
     children: [
       { path: '/',         element: <TripSetupDashboard /> },
       { path: '/drive',    element: <DriveAndSummary /> },
       { path: '/pipeline', element: <PipelineMonitor /> },
+      { path: '/server',   element: <ServerConsole /> },
     ],
   },
 ]);
